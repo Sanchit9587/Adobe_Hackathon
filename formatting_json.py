@@ -1,14 +1,17 @@
 import json
-import collections
 from pathlib import Path
+from collections import Counter
 
 def process_section(section, all_headings):
-    """Recursively extracts heading information from a section and its children."""
+    """
+    Recursively extracts heading information (text, page, and level)
+    from a section and its children.
+    """
     if "heading" in section:
         heading_info = {
             "text": section["heading"]["text"].replace('\n', ' ').strip(), # Clean up newlines
             "page": section["heading"]["page"],
-            "mean_size": section["heading"]["style"]["mean_size"]
+            "level": section["level"] # Use the 'level' attribute directly
         }
         all_headings.append(heading_info)
     if "children" in section:
@@ -17,8 +20,9 @@ def process_section(section, all_headings):
 
 def transform_pdfstructure_output(pdfstructure_output_data):
     """
-    Transforms the pdfstructure JSON output into the desired file02.json format
-    with the updated heading classification rules (H1-H5, rest body text).
+    Transforms the pdfstructure JSON output into the desired file02.json format.
+    It identifies the heading level (H1, H2, etc.) that has the most entries
+    and reclassifies that specific level as 'body text'.
 
     Args:
         pdfstructure_output_data (dict): The loaded JSON data from pdfstructure's output.
@@ -28,7 +32,7 @@ def transform_pdfstructure_output(pdfstructure_output_data):
     """
     all_headings_raw = []
     
-    # Extract all headings and their mean_sizes by recursively traversing the 'elements'
+    # Extract all headings and their levels by recursively traversing the 'elements'
     if "elements" in pdfstructure_output_data:
         for element in pdfstructure_output_data["elements"]:
             process_section(element, all_headings_raw)
@@ -36,35 +40,51 @@ def transform_pdfstructure_output(pdfstructure_output_data):
     if not all_headings_raw:
         return {"title": "No Title Found", "outline": []}
 
-    # Identify unique font sizes and sort them in descending order
-    unique_mean_sizes = sorted(list(set(h["mean_size"] for h in all_headings_raw)), reverse=True)
+    # Step 1: Perform initial classification (Level N -> H(N+1))
+    # and collect counts of each H level
+    initial_classified_headings = []
+    h_level_counts = Counter()
 
-    # Determine the mapping from mean_size to H1, H2, ... H5 or 'body text'
-    size_to_level_map = {}
-    for i, size in enumerate(unique_mean_sizes):
-        if i < 5: # Assign H1 to H5 for the top 5 largest distinct font sizes
-            size_to_level_map[size] = f"H{i + 1}"
-        else: # Everything after H5 (6th largest distinct size and smaller) is 'body text'
-            size_to_level_map[size] = "body text"
-
-    # Prepare the final outline
-    transformed_outline = []
+    # Heuristic for document title:
+    # If the very first extracted heading has level 0 and is on page 1,
+    # consider it the main document title and exclude it from the outline list.
     document_title = "Document Outline" # Default title if not found explicitly
+    headings_for_initial_classification = all_headings_raw
 
-    # Heuristic to identify the document title:
-    # Assume the very first heading with the largest font size (mapped to H1) and on page 1 is the title.
-    # This also removes it from the outline if it's considered the main title.
-    headings_for_outline = all_headings_raw
-    if all_headings_raw and all_headings_raw[0]["mean_size"] == unique_mean_sizes[0] and all_headings_raw[0]["page"] == 1:
+    if all_headings_raw and all_headings_raw[0]["level"] == 0 and all_headings_raw[0]["page"] == 1:
         document_title = all_headings_raw[0]["text"]
-        # Skip this first element as it's now the title
-        headings_for_outline = all_headings_raw[1:]
-            
-    for heading in headings_for_outline:
-        level_str = size_to_level_map.get(heading["mean_size"], "body text")
+        headings_for_initial_classification = all_headings_raw[1:] # Skip this first element
+
+    for heading in headings_for_initial_classification:
+        # Classify based on the 'level' attribute: Level N maps to H(N+1)
+        h_label = f"H{heading['level'] + 1}"
+        initial_classified_headings.append({
+            "level": h_label,
+            "text": heading["text"],
+            "page": heading["page"]
+        })
+        h_level_counts[h_label] += 1
+
+    # Step 2: Find the H level with the most texts
+    most_frequent_h_level = None
+    if h_level_counts:
+        # Find the H level with the highest count
+        most_frequent_h_level = max(h_level_counts, key=h_level_counts.get)
+        # Ensure 'body text' is not chosen if it somehow appears in counts (shouldn't with this logic)
+        if most_frequent_h_level.startswith("H"):
+            print(f"Identified '{most_frequent_h_level}' as the most frequent heading level to be reclassified as 'body text'.")
+        else:
+            most_frequent_h_level = None # Reset if it's not an H level
+
+    # Step 3: Prepare the final outline, reclassifying the most frequent H level
+    transformed_outline = []
+    for heading in initial_classified_headings:
+        current_level = heading["level"]
+        if current_level == most_frequent_h_level:
+            current_level = "body text" # Reclassify
         
         transformed_outline.append({
-            "level": level_str,
+            "level": current_level,
             "text": heading["text"],
             "page": heading["page"]
         })
@@ -79,7 +99,7 @@ if __name__ == "__main__":
     # Define paths relative to the script's execution location (project root)
     # This assumes you run this script from the root directory of your project.
     input_file_path = Path("content/extracted.json")
-    output_file_path = Path("content/file02_output.json") # Save output in the same content folder
+    output_file_path = Path("content/formatted.json") # Save output in the same content folder
 
     # Load the pdfstructure output JSON (from extracted.json)
     try:
@@ -96,7 +116,7 @@ if __name__ == "__main__":
     # Transform the data
     transformed_output = transform_pdfstructure_output(pdfstructure_output_data)
 
-    # Save the transformed data to file02_output.json
+    # Save the transformed data to formatted.json
     with open(output_file_path, 'w', encoding='utf-8') as f:
         json.dump(transformed_output, f, indent=4, ensure_ascii=False)
 
